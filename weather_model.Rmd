@@ -1,0 +1,385 @@
+---
+title: "Weather Forecast with Linear Models"
+author: "Mark Sidorovskiy"
+date: "18 December 2016"
+output: 
+  pdf_document: 
+    latex_engine: xelatex
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+##### Abstract
+
+
+In this project I apply machine learning technics to the weather forecast. The idea is to predict the temperature using the conditions in previous days and climate average. As a benchmark I parsed the archive of forecasts based on meteorological model. Simple linear model is worse than the official predictions. However, the model which uses both the previous records and official forecast was closer to the truth, than only official predictions. 
+
+
+## 1. Introduction
+
+
+In 2015 Yandex, one of the largest European internet companies and the leading search provider in Russia, has launched a service offering hyperlocal weather information based on its proprietary weather forecasting technology, Meteum. Powered by machine learning, it gives accurate forecasts for areas as local as specific parts of a city or even individual buildings.
+
+To calculate the weather forecast, Yandex’s new technology uses data from meteorological stations, as well as from other sources indirectly indicating the situation – about 9 terabytes of information every day. Traditional meteorology models are used to process the initial data, and then the intermediate results are processed using Yandex’s machine learning technology MatrixNet.
+
+In this project I am about to reproduce some of their results, using the data from one meteorology station in Moscow (VDNH) from 03.09.2008 to 17.12.2016 and the simplest machine learning method, namely linear regression. 
+
+The rest of the paper is organized as follows. Section 2 describes my data sources and the
+way in which I construct the data sets for training. In Section 3, I train my models. In Section 4 I examines the results. Finally, Section 5 concludes. 
+
+
+## 2. Data and Sample Construction
+
+
+Request some packages
+
+```{r, eval = FALSE}
+library(rvest)
+library(stringr)
+library(ggplot2)
+library(dplyr)
+library(zoo)
+library(data.table)
+```
+```{r, include = FALSE}
+library(rvest)
+library(stringr)
+library(ggplot2)
+library(dplyr)
+library(zoo)
+library(data.table)
+```
+
+The weather records in the last 5 years can be found in csv format at <http://rp5.ru/archive.php?wmo_id=27612&lang=ru> 
+
+```{r}
+real <- read.csv("moscow.csv", header = T, sep = ";", comment.char = '#', row.names = NULL)
+
+#names were read a litle bit wrong
+names(real) <- names(real[-1])
+
+head(real[,1:6])
+```
+
+The archive of weather forecasts can not be found that easy. I had to parse it from <http://meteoinfo.ru/archive-forecast/russia/moscow>, the code below runs for about 1.5 hours.  
+
+```{r, eval = FALSE}
+# Store web url
+start <- as.Date("2008-09-04")
+finish <- as.Date("2016-12-17")
+day <- seq(from = start, to = finish, by = "day")
+day <- gsub("-", "/", as.character(day))
+dat <- sub("^", "http://meteoinfo.ru/archive-forecast/russia/moscow-area/moscow/", day)
+
+forecast <- sapply(dat, function(x) {
+                            weather <- html(x)
+                            rating <- weather %>% 
+                              html_nodes("tr:nth-child(4) .pogodacell") %>%
+                              html_text()
+                          })
+```
+
+```{r, echo = FALSE}
+load("~/Desktop/R/weather/downloaded.RData")
+```
+```{r}
+head(forecast, 3)
+```
+
+The data are located in lists, convert in into the data frame. 
+
+```{r}
+m <- lapply(forecast, function(x) strsplit(x, "\\s\\s.\\s\\s"))
+n <- lapply(m, unlist)
+#remove empty lists
+n <- n[!sapply(n, is.null)]
+
+official_forecast <- t(as.data.frame(n))
+row.names(official_forecast) <- gsub("http...meteoinfo.ru.archive.forecast.russia.moscow.area.moscow.",
+                                     "",row.names(official_forecast))
+row.names(official_forecast) <- gsub("[[:punct:]]", "-", row.names(official_forecast))
+head(official_forecast)
+```
+
+Get the climate average from <http://meteoinfo.ru/clim-moscow-daily>.
+
+```{r}
+climate_average <- read.csv("climate_average.csv", header = F, sep = ";", row.names = NULL)
+head(climate_average)
+```
+
+Now I construct the data set, which I will use for the training. 
+
+First, convert climate average to vector:
+
+```{r}
+d <- as.vector(as.matrix(climate_average))
+d <- d[!is.na(d)]
+avg <- as.numeric(sub(",", ".", d, fixed = TRUE))
+head(avg, 10)
+```
+
+Then, I split the official forecast on day and night parts. For the further research I will use only the day part. 
+
+```{r}
+off_night <- official_forecast[,c(1,3,5,7,9,11,13)]
+off_day <- official_forecast[,c(2,4,6,8,10,12,14)]
+```
+
+From the weather records I take only temperature, pressure, humidity and wind speed. The observations are given for every 4 hours. I match the observations at 15.00 and at 03.00 with day and night official forecasts respectively.
+
+```{r, eval = FALSE}
+train <- real[,c(1,2,3,6,8)]
+time_train <- data.frame(matrix(unlist(strsplit(train$Местное.время, " ")), ncol=2, byrow=T))
+train <- cbind(train, time_train)
+train <- train[,-1]
+day_train <- filter(train, X2 == "15:00")
+night_train <- filter(train, X2 == "03:00")
+```
+
+This period consists of 3027 observations and in every group there are some missing rows. Fill the gaps with NA. 
+
+```{r, eval = FALSE}
+#off_day
+day <- as.Date(day, format = "%Y/%m/%d")
+
+dates_missing_off_day <- day[!(day %in% off_day$date)]
+missing_data_off_day <- data.frame(date = dates_missing_off_day, V1 = NA, 
+                                   V2 = NA, V3 = NA, V4 = NA, V5 = NA, V6 = NA, V7 = NA)
+off_day <- rbind(missing_data_off_day, off_day)
+off_day <- off_day[order(off_day$date),]
+
+#day_train
+
+dates_missing_day_train <- day[!(day %in% day_train$date)]
+missing_data_day_train <- data.frame(date = dates_missing_day_train, `T` = NA, 
+                                     Po = NA, U = NA, Ff = NA, X1 = NA, X2 = NA)
+day_train <- rbind(missing_data_day_train, day_train)
+day_train <- day_train[order(day_train$date),]
+
+```
+
+```{r, echo = FALSE}
+rm(list = ls())
+load("~/Desktop/R/weather/prepared_data.RData")
+```
+
+Finally, I construct the dataset from 7 previous temperature observations, 7 pressure observations, 3 humidity observations and 3 wind speed observations. 
+
+```{r}
+day_train_2 <- as.data.table(day_train[,c(1:5)])
+
+for (i in 1:7) {
+  day_train_2[, paste('T_day', i, sep = '_') := shift(day_train_2$`T`, i)]
+}
+
+for (i in 1:7) {
+  day_train_2[, paste('Po_day', i, sep = '_') := shift(day_train_2$Po, i)]
+}
+
+for (i in 1:3) {
+  day_train_2[, paste('U_day', i, sep = '_') := shift(day_train_2$U, i)]
+}
+
+for (i in 1:3) {
+  day_train_2[, paste('Ff_day', i, sep = '_') := shift(day_train_2$Ff, i)]
+}
+
+day_train_2 <- day_train_2[-c(1:10),]
+day_train_2 <- day_train_2[,-c(3:5)]
+```
+
+Then, add the climate average
+
+```{r}
+avg_2 <- c(avg[257:366], avg[-60], avg[-60], avg[-60], avg, avg[-60], avg[-60], avg[-60], avg[1:351])
+day_train_2 <- cbind(day_train_2, avg_2)
+head(day_train_2)
+```
+
+Finally, I fill NA in official forecast with the forecast in previous available day.
+
+```{r}
+off_day <- as.data.frame(apply(off_day, 2, na.locf))
+off_day[,-1] <- apply(off_day[,-1], 2, as.numeric)
+head(off_day)
+```
+
+## 3. Train models
+
+
+In sum, I trained 6 different models: 2 types of linear model for 1, 2 and 3 days forecasts. I split data on train and test and first make predictions for the next day. 
+
+```{r}
+train_day <- day_train_2[1:2665,]
+test_day <- day_train_2[-c(1:2665),]
+test_ans_day <- test_day[,1:2]
+
+train_day <- train_day[,-1]
+test_day <- test_day[,-c(1:2)]
+```
+```{r}
+linear_model <- lm(data = train_day, `T`~.)
+summary(linear_model)
+predictions_lm <- predict(linear_model, test_day)
+```
+
+Obviously, the 1-2 day lag features are statistically significant. The same for the magnitude of the coffiecients in every cathegory - for 1 day lag temperature it's 0.87 and for 2 day lag temperature it's only -0.06. The regression captures the most part of the variance in the dependent variable (R^2^ is 0.9281). 
+
+
+For the next model I mix previous dataset with the official predictions to improve them.
+
+```{r}
+day_train_3 <- cbind(day_train_2, off_day[-c(1:9, nrow(off_day)),])
+day_train_3 <- day_train_3[,-24]
+
+train_day_expand <- day_train_3[1:2665,]
+test_day_expand <- day_train_3[-c(1:2665),]
+
+train_day_expand <- train_day_expand[,-1]
+test_day_expand <- test_day_expand[,-c(1:2)]
+
+linear_model_2 <- lm(data = train_day_expand, `T`~.)
+summary(linear_model_2)
+predictions_lm_expand <- predict(linear_model_2, test_day_expand)
+```
+
+To estimate the efficiency of predictions, I use the mean absolute error (MAE). 
+
+```{r}
+mae <- function(actual, predicted) {
+  error <- actual - predicted
+  mean(abs(error), na.rm = T)
+}
+
+mae_11 <- mae(actual = test_ans_day$T, predicted = predictions_lm)
+mae_21 <- mae(actual = test_ans_day$T, predicted = predictions_lm_expand)
+
+off_test <- off_day[-c(1:9, nrow(off_day)), 2]
+mae_31 <- mae(actual = test_ans_day$T, predicted = off_test[-c(1:2665)])
+
+results <- cbind(test_ans_day, predictions_lm, predictions_lm_expand, off_test[-c(1:2665)])
+```
+
+I perform the same models for the predictions in 2 and 3 days forward. 
+
+```{r}
+day_train_4 <- day_train_2
+day_train_4[,2] <- c(day_train_2$T[-1], 0)
+
+train_day_2nd_day <- day_train_4[1:2665,]
+test_day_2nd_day <- day_train_4[-c(1:2665),]
+test_ans_day_2nd_day <- test_day_2nd_day[,1:2]
+
+train_day_2nd_day <- train_day_2nd_day[,-1]
+test_day_2nd_day <- test_day_2nd_day[,-c(1:2)]
+
+###
+
+linear_model_2nd_day <- lm(data = train_day_2nd_day, `T`~.)
+predictions_lm_2nd_day <- predict(linear_model_2nd_day, test_day_2nd_day)
+
+####
+
+day_train_5 <- cbind(day_train_2, off_day[-c(1:9, nrow(off_day)),])
+day_train_5[,2] <- c(day_train_2$T[-1], 0)
+day_train_5 <- day_train_5[,-24]
+
+train_day_expand_2nd_day <- day_train_5[1:2665,]
+test_day_expand_2nd_day <- day_train_5[-c(1:2665),]
+
+train_day_expand_2nd_day <- train_day_expand_2nd_day[,-1]
+test_day_expand_2nd_day <- test_day_expand_2nd_day[,-c(1:2)]
+
+linear_model_2_2nd_day <- lm(data = train_day_expand_2nd_day, `T`~.)
+predictions_lm_expand_2nd_day <- predict(linear_model_2_2nd_day, test_day_expand_2nd_day)
+```
+
+Then, estimate MAE. 
+
+```{r}
+mae_12 <- mae(actual = test_ans_day_2nd_day[-352,]$T, predicted = predictions_lm_2nd_day[-352])
+mae_22 <- mae(actual = test_ans_day_2nd_day[-352,]$T, predicted = predictions_lm_expand_2nd_day[-352])
+
+off_test_2nd_day <- off_day[-c(1:8, nrow(off_day),  nrow(off_day) - 1), 3]
+mae_32 <- mae(actual = test_ans_day_2nd_day[-352,]$T, predicted = off_test_2nd_day[-c(1:2665, 3017)])
+
+results_2nd_day <- cbind(test_ans_day_2nd_day, predictions_lm_2nd_day, predictions_lm_expand_2nd_day, off_test_2nd_day[-c(1:2665)])
+
+```
+
+```{r}
+##############
+### 3d day forecast
+
+day_train_6 <- day_train_2
+day_train_6[,2] <- c(day_train_2$T[-c(1:2)], 0, 0)
+
+train_day_3d_day <- day_train_6[1:2665,]
+test_day_3d_day <- day_train_6[-c(1:2665),]
+test_ans_day_3d_day <- test_day_3d_day[,1:2]
+
+train_day_3d_day <- train_day_3d_day[,-1]
+test_day_3d_day <- test_day_3d_day[,-c(1:2)]
+
+###
+
+linear_model_3d_day <- lm(data = train_day_3d_day, `T`~.)
+predictions_lm_3d_day <- predict(linear_model_3d_day, test_day_3d_day)
+
+####
+
+day_train_7 <- cbind(day_train_2, off_day[-c(1:9, nrow(off_day)),])
+day_train_7[,2] <- c(day_train_2$T[-c(1:2)],0, 0)
+day_train_7 <- day_train_7[,-24]
+
+train_day_expand_3d_day <- day_train_7[1:2665,]
+test_day_expand_3d_day <- day_train_7[-c(1:2665),]
+
+train_day_expand_3d_day <- train_day_expand_3d_day[,-1]
+test_day_expand_3d_day <- test_day_expand_3d_day[,-c(1:2)]
+
+linear_model_2_3d_day <- lm(data = train_day_expand_3d_day, `T`~.)
+predictions_lm_expand_3d_day <- predict(linear_model_2_3d_day, test_day_expand_3d_day)
+
+###
+
+mae_13 <- mae(actual = test_ans_day_3d_day[-c(351,352),]$T, predicted = predictions_lm_3d_day[-c(351,352)])
+mae_23 <- mae(actual = test_ans_day_3d_day[-c(351,352),]$T, predicted = predictions_lm_expand_3d_day[-c(351,352)])
+
+off_test_3d_day <- off_day[-c(1:7, nrow(off_day),  nrow(off_day) - 1, nrow(off_day) - 2), 4]
+mae_33 <- mae(actual = test_ans_day_3d_day[-c(351,352),]$T, predicted = off_test_3d_day[-c(1:2665, 3017, 3016)])
+
+results_3d_day <- cbind(test_ans_day_3d_day, predictions_lm_3d_day, predictions_lm_expand_3d_day, off_test_3d_day[-c(1:2665)])
+
+```
+
+
+## 4. Results
+
+
+Put all MAE coefficients in one table
+
+```{r}
+mae_total <- round(data.frame(c(mae_11, mae_31, mae_21), c(mae_12, mae_32, mae_22), c(mae_13, mae_33, mae_23), row.names = c("linear model", "offical forecast", "lm + official")), 2)
+names(mae_total) <- c("1st day", "2nd day", "3d day")
+
+mae_total
+```
+
+The predictions based only on the previous observations can give moderate results in weather forecasting. Traditional predictions give a good estimation of real weather conditions, but results decline with the increase of horizon. The mixture of these two approaches shows the best performances on this lenght.    
+
+The difference in predictions is represented on the graph below. They all have the same trend. 
+
+```{r pressure, warning=FALSE}
+ggplot(results[1:60,], aes(x = date)) +
+  geom_line(aes(y = `T`), size = 0.75) + 
+  geom_line(aes(y = predictions_lm), colour = "blue") +
+  geom_line(aes(y = predictions_lm_expand), colour = "green") +
+  geom_line(aes(y = V4), colour = "red") +
+  labs(x="Jan-Mar 2016",y="Temperature")
+```
+
+This model is not a final decision and other methods (say, xgboost) can likely reach the better score. 
